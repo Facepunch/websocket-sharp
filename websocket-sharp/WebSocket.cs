@@ -2341,6 +2341,99 @@ namespace WebSocketSharp
              && send (Fin.Final, Opcode.Cont, buff, false);
     }
 
+    [ThreadStatic]
+    private static byte[] _rawHeaderBuffer;
+
+    [ThreadStatic]
+    private static byte[] _maskingKeyBuffer;
+
+    private static byte[] getRawHeaderBuffer()
+    {
+      if (_rawHeaderBuffer == null)
+        _rawHeaderBuffer = new byte[14];
+
+      return _rawHeaderBuffer;
+    }
+
+    private static byte[] getMaskingKeyBuffer()
+    {
+      if (_maskingKeyBuffer == null)
+        _maskingKeyBuffer = new byte[4];
+
+      RandomNumber.GetBytes (_maskingKeyBuffer);
+      return _maskingKeyBuffer;
+    }
+
+    private bool sendRaw(byte[] data, int offset, int length)
+    {
+      lock (_forState) {
+        if (_readyState != WebSocketState.Open) {
+          _log.Error("The current state of the interface is not Open.");
+
+          return false;
+        }
+      }
+
+      try {
+        var header = getRawHeaderBuffer();
+        var mask = _client;
+        var idx = 0;
+
+        header[idx++] = 0x82; // FIN + Binary
+
+        if (length < 126) {
+          header[idx++] = (byte) (length | (mask ? 0x80 : 0x00));
+        }
+        else if (length <= ushort.MaxValue) {
+          header[idx++] = (byte) (126 | (mask ? 0x80 : 0x00));
+          header[idx++] = (byte) (length >> 8);
+          header[idx++] = (byte) length;
+        }
+        else {
+          header[idx++] = (byte) (127 | (mask ? 0x80 : 0x00));
+          ulong len = (ulong) length;
+          header[idx++] = (byte) (len >> 56);
+          header[idx++] = (byte) (len >> 48);
+          header[idx++] = (byte) (len >> 40);
+          header[idx++] = (byte) (len >> 32);
+          header[idx++] = (byte) (len >> 24);
+          header[idx++] = (byte) (len >> 16);
+          header[idx++] = (byte) (len >> 8);
+          header[idx++] = (byte) len;
+        }
+
+        byte[] maskKey = null;
+        if (mask) {
+          maskKey = getMaskingKeyBuffer();
+          header[idx++] = maskKey[0];
+          header[idx++] = maskKey[1];
+          header[idx++] = maskKey[2];
+          header[idx++] = maskKey[3];
+
+          for (int i = 0; i < length; i++)
+            data[offset + i] ^= maskKey[i & 3];
+        }
+
+        _stream.Write(header, 0, idx);
+
+        if (length > 0)
+          _stream.Write(data, offset, length);
+
+        if (mask && maskKey != null) {
+          for (int i = 0; i < length; i++)
+            data[offset + i] ^= maskKey[i & 3];
+        }
+      }
+      catch (Exception ex) {
+        _log.Error(ex.Message);
+        _log.Debug(ex.ToString ());
+
+        return false;
+      }
+
+      return true;
+    }
+
     private bool send (Fin fin, Opcode opcode, byte[] data, bool compressed)
     {
       var frame = new WebSocketFrame (fin, opcode, data, compressed, _client);
@@ -3702,6 +3795,50 @@ namespace WebSocketSharp
         throw new ArgumentNullException ("data");
 
       send (Opcode.Binary, new MemoryStream (data));
+    }
+
+    /// <summary>
+    /// Sends the specified data to the remote endpoint without extra allocations.
+    /// </summary>
+    /// <param name="data">
+    /// An array of <see cref="byte"/> that specifies the binary data to send.
+    /// </param>
+    /// <param name="offset">
+    /// An <see cref="int"/> that specifies the offset into <paramref name="data"/>.
+    /// </param>
+    /// <param name="length">
+    /// An <see cref="int"/> that specifies the number of bytes to send.
+    /// </param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="data"/> is <see langword="null"/>.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="offset"/> or <paramref name="length"/> is invalid.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// This method is not available when the current state of the interface
+    /// is not Open.
+    /// </exception>
+    public void SendRaw (byte[] data, int offset, int length)
+    {
+      if (_readyState != WebSocketState.Open) {
+        var msg = "The current state of the interface is not Open.";
+
+        throw new InvalidOperationException (msg);
+      }
+
+      if (data == null)
+        throw new ArgumentNullException ("data");
+
+      if (offset < 0 || length < 0 || offset + length > data.Length)
+        throw new ArgumentOutOfRangeException ("offset");
+
+      lock (_forSend) {
+        var sent = sendRaw (data, offset, length);
+
+        if (!sent)
+          error ("A send has failed.", null);
+      }
     }
 
     /// <summary>
