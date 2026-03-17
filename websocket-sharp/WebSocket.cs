@@ -2346,6 +2346,8 @@ namespace WebSocketSharp
 
     [ThreadStatic]
     private static byte[] _maskingKeyBuffer;
+    [ThreadStatic]
+    private static byte[] _sendPayloadBuffer;
 
     private static byte[] getRawHeaderBuffer()
     {
@@ -2364,6 +2366,26 @@ namespace WebSocketSharp
       return _maskingKeyBuffer;
     }
 
+    private static byte[] getSendPayloadBuffer (int minimumLength)
+    {
+      var buffer = _sendPayloadBuffer;
+
+      if (buffer == null || buffer.Length < minimumLength) {
+        var size = buffer != null ? buffer.Length : 1024;
+
+        if (size < 1024)
+          size = 1024;
+
+        while (size < minimumLength)
+          size <<= 1;
+
+        buffer = new byte[size];
+        _sendPayloadBuffer = buffer;
+      }
+
+      return buffer;
+    }
+
     private bool sendRaw(byte[] data, int offset, int length)
     {
       lock (_forState) {
@@ -2378,6 +2400,8 @@ namespace WebSocketSharp
         var header = getRawHeaderBuffer();
         var mask = _client;
         var idx = 0;
+        var payload = data;
+        var payloadOffset = offset;
 
         header[idx++] = 0x82; // FIN + Binary
 
@@ -2410,19 +2434,20 @@ namespace WebSocketSharp
           header[idx++] = maskKey[2];
           header[idx++] = maskKey[3];
 
-          for (int i = 0; i < length; i++)
-            data[offset + i] ^= maskKey[i & 3];
+          if (length > 0) {
+            payload = getSendPayloadBuffer (length);
+            Buffer.BlockCopy (data, offset, payload, 0, length);
+            payloadOffset = 0;
+
+            for (int i = 0; i < length; i++)
+              payload[i] ^= maskKey[i & 3];
+          }
         }
 
         _stream.Write(header, 0, idx);
 
         if (length > 0)
-          _stream.Write(data, offset, length);
-
-        if (mask && maskKey != null) {
-          for (int i = 0; i < length; i++)
-            data[offset + i] ^= maskKey[i & 3];
-        }
+          _stream.Write(payload, payloadOffset, length);
       }
       catch (Exception ex) {
         _log.Error(ex.Message);
