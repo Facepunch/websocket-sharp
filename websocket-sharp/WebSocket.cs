@@ -2400,8 +2400,6 @@ namespace WebSocketSharp
         var header = getRawHeaderBuffer();
         var mask = _client;
         var idx = 0;
-        var payload = data;
-        var payloadOffset = offset;
 
         header[idx++] = 0x82; // FIN + Binary
 
@@ -2427,6 +2425,7 @@ namespace WebSocketSharp
         }
 
         byte[] maskKey = null;
+        byte[] payload = null;
         if (mask) {
           maskKey = getMaskingKeyBuffer();
           header[idx++] = maskKey[0];
@@ -2437,7 +2436,6 @@ namespace WebSocketSharp
           if (length > 0) {
             payload = getSendPayloadBuffer (length);
             Buffer.BlockCopy (data, offset, payload, 0, length);
-            payloadOffset = 0;
 
             for (int i = 0; i < length; i++)
               payload[i] ^= maskKey[i & 3];
@@ -2446,8 +2444,12 @@ namespace WebSocketSharp
 
         _stream.Write(header, 0, idx);
 
-        if (length > 0)
-          _stream.Write(payload, payloadOffset, length);
+        if (length > 0) {
+          var buffer = payload ?? data;
+          var bufferOffset = payload != null ? 0 : offset;
+
+          _stream.Write(buffer, bufferOffset, length);
+        }
       }
       catch (Exception ex) {
         _log.Error(ex.Message);
