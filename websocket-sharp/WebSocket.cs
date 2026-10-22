@@ -2342,19 +2342,17 @@ namespace WebSocketSharp
     }
 
     [ThreadStatic]
-    private static byte[] _rawHeaderBuffer;
+    private static byte[] _rawMessageBuffer;
 
     [ThreadStatic]
     private static byte[] _maskingKeyBuffer;
-    [ThreadStatic]
-    private static byte[] _sendPayloadBuffer;
 
-    private static byte[] getRawHeaderBuffer()
+    private static byte[] getRawMessageBuffer(int length)
     {
-      if (_rawHeaderBuffer == null)
-        _rawHeaderBuffer = new byte[14];
-
-      return _rawHeaderBuffer;
+      const int HeaderSize = 14;
+      if (_rawMessageBuffer == null || _rawMessageBuffer.Length < HeaderSize + length)
+        _rawMessageBuffer = new byte[HeaderSize + length];
+      return _rawMessageBuffer;
     }
 
     private static byte[] getMaskingKeyBuffer()
@@ -2364,26 +2362,6 @@ namespace WebSocketSharp
 
       RandomNumber.GetBytes (_maskingKeyBuffer);
       return _maskingKeyBuffer;
-    }
-
-    private static byte[] getSendPayloadBuffer (int minimumLength)
-    {
-      var buffer = _sendPayloadBuffer;
-
-      if (buffer == null || buffer.Length < minimumLength) {
-        var size = buffer != null ? buffer.Length : 1024;
-
-        if (size < 1024)
-          size = 1024;
-
-        while (size < minimumLength)
-          size <<= 1;
-
-        buffer = new byte[size];
-        _sendPayloadBuffer = buffer;
-      }
-
-      return buffer;
     }
 
     private bool sendRaw(byte[] data, int offset, int length)
@@ -2397,59 +2375,51 @@ namespace WebSocketSharp
       }
 
       try {
-        var header = getRawHeaderBuffer();
+        var buffer = getRawMessageBuffer(length);
         var mask = _client;
         var idx = 0;
 
-        header[idx++] = 0x82; // FIN + Binary
+        buffer[idx++] = 0x82; // FIN + Binary
 
         if (length < 126) {
-          header[idx++] = (byte) (length | (mask ? 0x80 : 0x00));
+          buffer[idx++] = (byte) (length | (mask ? 0x80 : 0x00));
         }
         else if (length <= ushort.MaxValue) {
-          header[idx++] = (byte) (126 | (mask ? 0x80 : 0x00));
-          header[idx++] = (byte) (length >> 8);
-          header[idx++] = (byte) length;
+          buffer[idx++] = (byte) (126 | (mask ? 0x80 : 0x00));
+          buffer[idx++] = (byte) (length >> 8);
+          buffer[idx++] = (byte) length;
         }
         else {
-          header[idx++] = (byte) (127 | (mask ? 0x80 : 0x00));
+          buffer[idx++] = (byte) (127 | (mask ? 0x80 : 0x00));
           ulong len = (ulong) length;
-          header[idx++] = (byte) (len >> 56);
-          header[idx++] = (byte) (len >> 48);
-          header[idx++] = (byte) (len >> 40);
-          header[idx++] = (byte) (len >> 32);
-          header[idx++] = (byte) (len >> 24);
-          header[idx++] = (byte) (len >> 16);
-          header[idx++] = (byte) (len >> 8);
-          header[idx++] = (byte) len;
+          buffer[idx++] = (byte) (len >> 56);
+          buffer[idx++] = (byte) (len >> 48);
+          buffer[idx++] = (byte) (len >> 40);
+          buffer[idx++] = (byte) (len >> 32);
+          buffer[idx++] = (byte) (len >> 24);
+          buffer[idx++] = (byte) (len >> 16);
+          buffer[idx++] = (byte) (len >> 8);
+          buffer[idx++] = (byte) len;
         }
 
         byte[] maskKey = null;
-        byte[] payload = null;
-        if (mask) {
+        if(mask) {
           maskKey = getMaskingKeyBuffer();
-          header[idx++] = maskKey[0];
-          header[idx++] = maskKey[1];
-          header[idx++] = maskKey[2];
-          header[idx++] = maskKey[3];
-
-          if (length > 0) {
-            payload = getSendPayloadBuffer (length);
-            Buffer.BlockCopy (data, offset, payload, 0, length);
-
-            for (int i = 0; i < length; i++)
-              payload[i] ^= maskKey[i & 3];
-          }
+          buffer[idx++] = maskKey[0];
+          buffer[idx++] = maskKey[1];
+          buffer[idx++] = maskKey[2];
+          buffer[idx++] = maskKey[3];
         }
 
-        _stream.Write(header, 0, idx);
+        Buffer.BlockCopy (data, offset, buffer, idx, length);
+        idx += length;
 
-        if (length > 0) {
-          var buffer = payload ?? data;
-          var bufferOffset = payload != null ? 0 : offset;
-
-          _stream.Write(buffer, bufferOffset, length);
+        if (mask) {
+          for (int i = 0; i < length; i++)
+            buffer[idx - length + i] ^= maskKey[i & 3];
         }
+
+        _stream.Write(buffer, 0, idx);
       }
       catch (Exception ex) {
         _log.Error(ex.Message);
